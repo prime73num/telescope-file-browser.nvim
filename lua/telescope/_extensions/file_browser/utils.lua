@@ -108,11 +108,11 @@ end
 -- redraws prompt and results border contingent on picker status
 fb_utils.redraw_border_title = function(current_picker)
   local finder = current_picker.finder
-  if current_picker.prompt_border then
+  if current_picker.prompt_border and not finder.prompt_title then
     local new_title = finder.files and "File Browser" or "Folder Browser"
     current_picker.prompt_border:change_title(new_title)
   end
-  if current_picker.results_border then
+  if current_picker.results_border and not finder.results_title then
     local new_title
     if finder.files or finder.cwd_to_path then
       new_title = Path:new(finder.path):make_relative(vim.loop.cwd())
@@ -144,6 +144,50 @@ fb_utils.group_by_type = function(tbl)
     else
       return x < y
     end
+  end)
+end
+
+--- Telescope Wrapper around vim.notify
+---@param funname string: name of the function that will be
+---@param opts table: opts.level string, opts.msg string
+fb_utils.notify = function(funname, opts)
+  -- avoid circular require
+  local fb_config = require "telescope._extensions.file_browser.config"
+  local quiet = vim.F.if_nil(opts.quiet, fb_config.values.quiet)
+  if not quiet then
+    local level = vim.log.levels[opts.level]
+    if not level then
+      error("Invalid error level", 2)
+    end
+
+    vim.notify(string.format("[file_browser.%s] %s", funname, opts.msg), level, {
+      title = "telescope-file-browser.nvim",
+    })
+  end
+end
+
+local _get_selection_index = function(path, dir, results)
+  local path_dir = Path:new(path):parent():absolute()
+  if dir == path_dir then
+    for i, path_entry in ipairs(results) do
+      if path_entry.value == path then
+        return i
+      end
+    end
+  end
+end
+
+-- Sets the selection to absolute path if found in the currently opened folder in the file browser
+fb_utils.selection_callback = function(current_picker, absolute_path)
+  current_picker._completion_callbacks = vim.F.if_nil(current_picker._completion_callbacks, {})
+  table.insert(current_picker._completion_callbacks, function(picker)
+    local finder = picker.finder
+    local dir = finder.files and finder.path or finder.cwd
+    local selection_index = _get_selection_index(absolute_path, dir, finder.results)
+    if selection_index and selection_index ~= 1 then
+      picker:set_selection(picker:get_row(selection_index))
+    end
+    table.remove(picker._completion_callbacks)
   end)
 end
 

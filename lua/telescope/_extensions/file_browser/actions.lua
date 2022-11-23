@@ -1,6 +1,5 @@
 ---@tag telescope-file-browser.actions
-
---@module telescope-file-browser.actions
+---@config { ["module"] = "telescope-file-browser.actions" }
 
 ---@brief [[
 --- The file browser actions are functions enable file system operations from within the file browser picker.
@@ -32,8 +31,10 @@ local a = vim.api
 local fb_utils = require "telescope._extensions.file_browser.utils"
 
 local actions = require "telescope.actions"
+local state = require "telescope.state"
 local action_state = require "telescope.actions.state"
 local action_utils = require "telescope.actions.utils"
+local action_set = require "telescope.actions.set"
 local config = require "telescope.config"
 local transform_mod = require("telescope.actions.mt").transform_mod
 
@@ -58,7 +59,36 @@ local get_target_dir = function(finder)
   return finder.files and finder.path or entry_path
 end
 
---- Creates a new file in the current directory of the |fb_picker.file_browser|.
+-- return Path file on success, otherwise nil
+local create = function(file, finder)
+  if not file then
+    return
+  end
+  if
+    file == ""
+    or (finder.files and file == finder.path .. os_sep)
+    or (not finder.files and file == finder.cwd .. os_sep)
+  then
+    fb_utils.notify(
+      "actions.create",
+      { msg = "Please enter a valid file or folder name!", level = "WARN", quiet = finder.quiet }
+    )
+    return
+  end
+  file = Path:new(file)
+  if file:exists() then
+    fb_utils.notify("actions.create", { msg = "Selection already exists!", level = "WARN", quiet = finder.quiet })
+    return
+  end
+  if not fb_utils.is_dir(file.filename) then
+    file:touch { parents = true }
+  else
+    Path:new(file.filename:sub(1, -2)):mkdir { parents = true }
+  end
+  return file
+end
+
+--- Creates a new file or dir in the current directory of the |telescope-file-browser.picker.file_browser|.
 --- - Finder:
 ---   - file_browser: create a file in the currently opened directory
 ---   - folder_browser: create a file in the currently selected directory
@@ -71,31 +101,36 @@ fb_actions.create = function(prompt_bufnr)
   local finder = current_picker.finder
 
   local default = get_target_dir(finder) .. os_sep
-  vim.ui.input({ prompt = "Insert the file name:\n", default = default }, function(file)
-    if not file then
-      return
+  vim.ui.input({ prompt = "Insert the file name: ", default = default, completion = "file" }, function(input)
+    vim.cmd [[ redraw ]] -- redraw to clear out vim.ui.prompt to avoid hit-enter prompt
+    local file = create(input, finder)
+    if file then
+      -- values from finder for values don't have trailing os sep for folders
+      local path = file:absolute()
+      path = file:is_dir() and path:sub(1, -2) or path
+      fb_utils.selection_callback(current_picker, path)
+      current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
     end
-    if file == "" then
-      print "Please enter valid filename!"
-      return
-    end
-    if file == finder.path .. os_sep then
-      print "Please enter valid file or folder name!"
-      return
-    end
-    file = Path:new(file)
-
-    if file:exists() then
-      error "File or folder already exists."
-      return
-    end
-    if not fb_utils.is_dir(file.filename) then
-      file:touch { parents = true }
-    else
-      Path:new(file.filename:sub(1, -2)):mkdir { parents = true }
-    end
-    current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
   end)
+end
+
+--- Creates a new file or dir via prompt in the current directory of the |telescope-file-browser.picker.file_browser|.
+--- - Notes:
+---   - You can create folders by ending the name in the path separator of your OS, e.g. "/" on Unix systems
+---   - You can implicitly create new folders by passing $/CWD/new_folder/filename.lua
+---@param prompt_bufnr number: The prompt bufnr
+fb_actions.create_from_prompt = function(prompt_bufnr)
+  local current_picker = action_state.get_current_picker(prompt_bufnr)
+  local finder = current_picker.finder
+  local input = (finder.files and finder.path or finder.cwd) .. os_sep .. current_picker:_get_prompt()
+  local file = create(input, finder)
+  if file then
+    -- pretend new file path is entry
+    local path = file:absolute()
+    state.set_global_key("selected_entry", { path, value = path, path = path, Path = file })
+    -- select as if were proper entry to support eg changing into created folder
+    action_set.select(prompt_bufnr, "default")
+  end
 end
 
 local batch_rename = function(prompt_bufnr, selections)
@@ -171,40 +206,15 @@ local batch_rename = function(prompt_bufnr, selections)
   ))
 end
 
---- Rename files or folders for |fb_picker.file_browser|.<br>
+--- Rename files or folders for |telescope-file-browser.picker.file_browser|.<br>
 --- Notes:
 --- - Triggering renaming with multi selections opens `Batch Rename` window<br>
 ---   in which the user can rename/move files multi-selected files at once
 --- - In `Batch Rename`, the number of paths must persist: keeping a file name means keeping the line unchanged
 ---@param prompt_bufnr number: The prompt bufnr
-
-
-
-
-
-fb_actions.myopen = function(prompt_bufnr)
-  local entry = action_state.get_selected_entry()
-  if not (entry and entry.Path:is_dir()) then
-      local dir = vim.fn.fnamemodify(entry.value, ":p")
-      actions.close(prompt_bufnr)
-      print(dir)
-      vim.cmd(string.format("e %s",dir))
-  else 
-      local path = vim.loop.fs_realpath(action_state.get_selected_entry().path)
-      local current_picker = action_state.get_current_picker(prompt_bufnr)
-      local finder = current_picker.finder
-      finder.files = true
-      finder.path = path
-      fb_utils.redraw_border_title(current_picker)
-      current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
-  end
-end
-
-
-
-
 fb_actions.rename = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
+  local quiet = current_picker.finder.quiet
   local selections = fb_utils.get_selected_files(prompt_bufnr, false)
   local parent_dir = Path:new(current_picker.finder.path):parent()
 
@@ -213,51 +223,64 @@ fb_actions.rename = function(prompt_bufnr)
   else
     local entry = action_state.get_selected_entry()
     if not entry then
-      print "[telescope] Nothing currently selected to be renamed"
+      fb_utils.notify("action.rename", { msg = "No selection to be renamed!", level = "WARN" })
       return
     end
     local old_path = Path:new(entry[1])
     -- "../" aka parent_dir more common so test first
     if old_path.filename == parent_dir.filename then
-      print "Please select a file!"
+      fb_utils.notify("action.rename", { msg = "Please select a valid file or folder!", level = "WARN", quiet = quiet })
       return
     end
-    local new_name = vim.fn.input("Insert a new name:\n", old_path:absolute())
-    if new_name == "" then
-      print "Renaming file aborted."
-      return
-    end
-    local new_path = Path:new(new_name)
+    vim.ui.input({ prompt = "Insert a new name: ", default = old_path:absolute(), completion = "file" }, function(file)
+      vim.cmd [[ redraw ]] -- redraw to clear out vim.ui.prompt to avoid hit-enter prompt
+      if file == "" or file == nil then
+        fb_utils.notify("action.rename", { msg = "Renaming aborted!", level = "WARN", quiet = quiet })
+        return
+      end
+      local new_path = Path:new(file)
 
-    if old_path.filename == new_path.filename then
-      print "Original and new filename are the same! Skipping."
-      return
-    end
+      if old_path.filename == new_path.filename then
+        fb_utils.notify("action.rename", {
+          msg = string.format(
+            "Name of selection unchanged! Skipping.",
+            new_path.filename:sub(#new_path:parent().filename + 2)
+          ),
+          level = "WARN",
+          quiet = quiet,
+        })
+        return
+      end
+      if new_path:exists() then
+        fb_utils.notify("action.rename", {
+          msg = string.format("%s already exists! Skipping.", new_path.filename:sub(#new_path:parent().filename + 2)),
+          level = "WARN",
+          quiet = quiet,
+        })
+        return
+      end
 
-    if new_path:exists() then
-      print(string.format("%s already exists! Skipping.", new_path.filename))
-      return
-    end
+      -- rename changes old_name in place
+      local old_name = old_path:absolute()
 
-    -- rename changes old_name in place
-    local old_name = old_path:absolute()
+      old_path:rename { new_name = new_path.filename }
+      if not new_path:is_dir() then
+        fb_utils.rename_buf(old_name, new_path:absolute())
+      else
+        fb_utils.rename_dir_buf(old_name, new_path:absolute())
+      end
 
-    old_path:rename { new_name = new_path.filename }
-    if not new_path:is_dir() then
-      fb_utils.rename_buf(old_name, new_path:absolute())
-    else
-      fb_utils.rename_dir_buf(old_name, new_path:absolute())
-    end
-
-    -- persist multi selections unambiguously by only removing renamed entry
-    if current_picker:is_multi_selected(entry) then
-      current_picker._multi:drop(entry)
-    end
-    current_picker:refresh(current_picker.finder)
+      -- persist multi selections unambiguously by only removing renamed entry
+      if current_picker:is_multi_selected(entry) then
+        current_picker._multi:drop(entry)
+      end
+      fb_utils.selection_callback(current_picker, new_path:absolute())
+      current_picker:refresh(current_picker.finder)
+    end)
   end
 end
 
---- Move multi-selected files or folders to current directory in |fb_picker.file_browser|.<br>
+--- Move multi-selected files or folders to current directory in |telescope-file-browser.picker.file_browser|.<br>
 --- Note: Performs a blocking synchronized file-system operation.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.move = function(prompt_bufnr)
@@ -266,29 +289,45 @@ fb_actions.move = function(prompt_bufnr)
 
   local selections = fb_utils.get_selected_files(prompt_bufnr, false)
   if vim.tbl_isempty(selections) then
-    print "[telescope] Nothing currently selected to be moved"
+    fb_utils.notify("actions.move", { msg = "No selection to be moved!", level = "WARN", quiet = finder.quiet })
     return
   end
 
   local target_dir = get_target_dir(finder)
-  for _, selection in ipairs(selections) do
+  local moved = {}
+  local skipped = {}
+
+  for idx, selection in ipairs(selections) do
     local filename = selection.filename:sub(#selection:parent().filename + 2)
     local new_path = Path:new { target_dir, filename }
     if new_path:exists() then
-      print(string.format("%s already exists in target folder! Skipping.", filename))
+      table.insert(skipped, filename)
     else
       selection:rename {
         new_name = new_path.filename,
       }
-      print(string.format("%s has been moved!", filename))
+      table.insert(moved, filename)
+      if idx == 1 and #selections == 1 then
+        fb_utils.selection_callback(current_picker, new_path:absolute())
+      end
     end
   end
+
+  local message = ""
+  if not vim.tbl_isempty(moved) then
+    message = message .. "Moved: " .. table.concat(moved, ", ")
+  end
+  if not vim.tbl_isempty(skipped) then
+    message = message ~= "" and (message .. "\n") or message
+    message = message .. "Skipping existing: " .. table.concat(skipped, ", ")
+  end
+  fb_utils.notify("actions.move", { msg = message, level = "INFO", quiet = finder.quiet })
 
   -- reset multi selection
   current_picker:refresh(current_picker.finder, { reset_prompt = true })
 end
 
---- Copy file or folders recursively to current directory in |fb_picker.file_browser|.<br>
+--- Copy file or folders recursively to current directory in |telescope-file-browser.picker.file_browser|.<br>
 --- - Finder:
 ---   - file_browser: copies (multi-selected) file(s) in/to opened dir (w/o multi-selection, creates in-place copy)
 ---   - folder_browser: copies (multi-selected) file(s) in/to selected dir (w/o multi-selection, creates in-place copy)
@@ -298,75 +337,128 @@ fb_actions.copy = function(prompt_bufnr)
   local finder = current_picker.finder
 
   local selections = fb_utils.get_selected_files(prompt_bufnr, true)
+  local has_multi = not vim.tbl_isempty(current_picker._multi._entries)
   if vim.tbl_isempty(selections) then
-    print "[telescope] Nothing currently selected to be copied"
+    fb_utils.notify("actions.copy", { msg = "No selection to be copied!", level = "WARN", quiet = finder.quiet })
     return
   end
 
   local target_dir = get_target_dir(finder)
-  for _, selection in ipairs(selections) do
-    -- file:absolute() == target_dir for copying folder in place in folder_browser
-    local name = selection:absolute() ~= target_dir and selection.filename:sub(#selection:parent().filename + 2) or nil
-    local destination = Path:new {
-      target_dir,
-      name,
-    }
-    -- copying file or folder within original directory
-    if destination:absolute() == selection:absolute() then
-      local absolute_path = selection:absolute()
-      -- TODO: maybe use vim.ui.input but we *must* block which most likely is not guaranteed
-      destination = vim.fn.input {
-        prompt = string.format(
-          "Copying existing file or folder within original directory, please provide a new file or folder name:\n",
-          absolute_path
-        ),
-        default = absolute_path,
+
+  -- embed copying into function that can be recalled post vim.ui.input
+  -- vim.ui.input is triggered whenever files are copied within the original folder
+  -- TODO maybe we can opt-in triggering vim.ui.input when potentially overwriting files as well
+  local copied = {}
+  local index = 1
+  local copy_selections
+  copy_selections = function()
+    -- scoping
+    local selection, name, destination, exists
+    -- TODO disallow copying parent folder into sub-folder
+    while index <= #selections do
+      selection = selections[index]
+      name = table.remove(selection:_split())
+      destination = Path:new {
+        target_dir,
+        name,
       }
-      if destination == absolute_path then
-        a.nvim_echo(
-          { { string.format("\nSource and target paths are identical for copying %s! Skipping.", absolute_path) } },
-          false,
-          {}
-        )
-        destination = ""
+      -- copying file or folder within original directory
+      if destination:exists() then
+        exists = true -- trigger vim.ui.input outside loop to avoid interleaving
+        break
+      else
+        if selection:is_dir() and selection:absolute() == destination:parent():absolute() then
+          local message = string.format("Copying folder into itself not (yet) supported", name)
+          fb_utils.notify("actions.copy", { msg = message, level = "INFO", quiet = finder.quiet })
+        else
+          selection:copy {
+            destination = destination,
+            recursive = true,
+            parents = true,
+          }
+          table.insert(copied, name)
+        end
+        index = index + 1
       end
     end
-    if destination ~= "" then -- vim.fn.input may return "" on cancellation
-      selection:copy {
-        destination = destination,
-        recursive = true,
-        parents = true,
-      }
-      print(string.format("\n%s has been copied!", name))
+    if exists then
+      exists = false
+      vim.ui.input({
+        prompt = string.format(
+          "Please enter a new name, <CR> to overwrite (merge), or <ESC> to skip file (folder):\n",
+          name
+        ),
+        default = destination:absolute(),
+        completion = "file",
+      }, function(input)
+        vim.cmd [[ redraw ]] -- redraw to clear out vim.ui.prompt to avoid hit-enter prompt
+        if input ~= nil then
+          selection:copy {
+            destination = input,
+            recursive = true,
+            parents = true,
+          }
+          table.insert(copied, name)
+        end
+        -- if copying current selection within folder w/o multi-selection, set cursor on copied file/dir
+        if not has_multi then
+          fb_utils.selection_callback(current_picker, input)
+        end
+        index = index + 1
+        copy_selections()
+      end)
+    else
+      if not vim.tbl_isempty(copied) then
+        local message = "Copied: " .. table.concat(copied, ", ")
+        fb_utils.notify("actions.copy", { msg = message, level = "INFO", quiet = finder.quiet })
+      end
     end
+    current_picker:refresh(current_picker.finder, { reset_prompt = true })
   end
-
-  current_picker:refresh(current_picker.finder, { reset_prompt = true })
+  copy_selections()
 end
 
---- Remove file or folders recursively for |fb_picker.file_browser|.<br>
+--- Remove file or folders recursively for |telescope-file-browser.picker.file_browser|.<br>
 --- Note: Performs a blocking synchronized file-system operation.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.remove = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
+  local finder = current_picker.finder
+  local quiet = current_picker.finder.quiet
   local selections = fb_utils.get_selected_files(prompt_bufnr, true)
   if vim.tbl_isempty(selections) then
-    print "[telescope] Nothing currently selected to be removed"
+    fb_utils.notify("actions.move", { msg = "No selection to be removed!", level = "WARN", quiet = quiet })
     return
   end
 
-  local filenames = vim.tbl_map(function(sel)
-    return sel:absolute()
+  local files = vim.tbl_map(function(sel)
+    return sel.filename:sub(#sel:parent().filename + 2)
   end, selections)
 
-  print "These files are going to be deleted:"
-  for _, file in ipairs(filenames) do
-    print(file)
+  for _, sel in ipairs(selections) do
+    if sel:is_dir() then
+      local abs = sel:absolute()
+      local msg
+      if finder.files and Path:new(finder.path):parent():absolute() == abs then
+        msg = "Parent folder cannot be deleted!"
+      end
+      if not finder.files and Path:new(finder.cwd):absolute() == abs then
+        msg = "Current folder cannot be deleted!"
+      end
+      if msg then
+        fb_utils.notify("actions.remove", { msg = msg .. " Prematurely aborting.", level = "WARN", quiet = quiet })
+        return
+      end
+    end
   end
-  -- format printing adequately
-  print "\n"
 
-  vim.ui.input({ prompt = "Remove selected files [y/N]: " }, function(input)
+  local removed = {}
+
+  local message = "Selections to be deleted: " .. table.concat(files, ", ")
+  fb_utils.notify("actions.remove", { msg = message, level = "INFO", quiet = quiet })
+  -- TODO fix default vim.ui.input and nvim-notify 'selections to be deleted' message
+  vim.ui.input({ prompt = "Remove selections [y/N]: " }, function(input)
+    vim.cmd [[ redraw ]] -- redraw to clear out vim.ui.prompt to avoid hit-enter prompt
     if input and input:lower() == "y" then
       for _, p in ipairs(selections) do
         local is_dir = p:is_dir()
@@ -377,16 +469,20 @@ fb_actions.remove = function(prompt_bufnr)
         else
           fb_utils.delete_dir_buf(p:absolute())
         end
-        print(string.format("\n%s has been removed!", p:absolute()))
+        table.insert(removed, p.filename:sub(#p:parent().filename + 2))
       end
+      fb_utils.notify(
+        "actions.remove",
+        { msg = "Removed: " .. table.concat(removed, ", "), level = "INFO", quiet = quiet }
+      )
       current_picker:refresh(current_picker.finder)
     else
-      print " Removing files aborted!"
+      fb_utils.notify("actions.remove", { msg = "Removing selections aborted!", level = "INFO", quiet = quiet })
     end
   end)
 end
 
---- Toggle hidden files or folders for |fb_picker.file_browser|.
+--- Toggle hidden files or folders for |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.toggle_hidden = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
@@ -403,9 +499,10 @@ end
 ---   - macOS: relies on `open` to start the program
 ---   - Windows: defaults to default applications through `start`
 fb_actions.open = function(prompt_bufnr)
+  local quiet = action_state.get_current_picker(prompt_bufnr).finder.quiet
   local selections = fb_utils.get_selected_files(prompt_bufnr, true)
   if vim.tbl_isempty(selections) then
-    print "[telescope] Nothing currently selected to be opened"
+    fb_utils.notify("actions.open", { msg = "No selection to be opened!", level = "INFO", quiet = quiet })
     return
   end
 
@@ -421,39 +518,42 @@ fb_actions.open = function(prompt_bufnr)
   actions.close(prompt_bufnr)
 end
 
---- Goto parent directory in |fb_picker.file_browser|.
+--- Goto parent directory in |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 ---@param bypass boolean: Allow passing beyond the globally set current working directory
 fb_actions.goto_parent_dir = function(prompt_bufnr, bypass)
   bypass = vim.F.if_nil(bypass, true)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  local parent_dir = Path:new(finder.path):parent()
+  local parent_dir = Path:new(finder.path):parent():absolute()
 
   if not bypass then
     if vim.loop.cwd() == finder.path then
-      print "You can't go up any further!"
+      fb_utils.notify(
+        "action.goto_parent_dir",
+        { msg = "You cannot bypass the current working directory!", level = "WARN", quiet = finder.quiet }
+      )
       return
     end
   end
 
-  finder.path = parent_dir .. os_sep
+  finder.path = parent_dir
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
 end
 
---- Goto working directory of nvim in |fb_picker.file_browser|.
+--- Goto working directory of nvim in |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.goto_cwd = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.path = finder.cwd
+  finder.path = vim.loop.cwd()
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
 end
 
---- Change working directory of nvim to the selected file/folder in |fb_picker.file_browser|.
+--- Change working directory of nvim to the selected file/folder in |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.change_cwd = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
@@ -465,34 +565,37 @@ fb_actions.change_cwd = function(prompt_bufnr)
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
-  print "[telescope] Changed nvim's current working directory"
+  fb_utils.notify(
+    "action.change_cwd",
+    { msg = "Set the current working directory!", level = "INFO", quiet = finder.quiet }
+  )
 end
 
---- Goto home directory in |fb_picker.file_browser|.
+--- Goto home directory in |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.goto_home_dir = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.path = vim.fn.getcwd()
+  finder.path = vim.loop.os_homedir()
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
 end
 
---- Toggle between file and folder browser for |fb_picker.file_browser|.
+--- Toggle between file and folder browser for |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.toggle_browser = function(prompt_bufnr, opts)
   opts = opts or {}
   opts.reset_prompt = vim.F.if_nil(opts.reset_prompt, true)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.mycount = (finder.mycount+1)%3
+  finder.files = not finder.files
 
   fb_utils.redraw_border_title(current_picker)
-  current_picker:refresh(finder, { reset_prompt = opts.reset_prompt, multi = current_picker._multi})
+  current_picker:refresh(finder, { reset_prompt = opts.reset_prompt, multi = current_picker._multi })
 end
 
---- Toggles all selections akin to |actions.toggle_all| but ignores parent & current directory
+--- Toggles all selections akin to |telescope.actions.toggle_all| but ignores parent & current directory
 --- - Note: if the parent or current directory were selected, they will be ignored (manually unselect with `<TAB>`)
 ---@param prompt_bufnr number: The prompt bufnr
 fb_actions.toggle_all = function(prompt_bufnr)
@@ -509,7 +612,7 @@ fb_actions.toggle_all = function(prompt_bufnr)
   end)
 end
 
---- Multi select all entries akin to |actions.select_all| but ignores parent & current directory
+--- Multi select all entries akin to |telescope.actions.select_all| but ignores parent & current directory
 --- - Note:
 ---   - selected entries may include results not visible in the results popup.
 ---   - if the parent or current directly was previously selected, they will be ignored in the selected state (manually unselect with `<TAB>`)
@@ -526,6 +629,74 @@ fb_actions.select_all = function(prompt_bufnr)
           current_picker.highlighter:hi_multiselect(row, current_picker._multi:is_selected(entry))
         end
       end
+    end
+  end)
+end
+
+local sort_by = function(prompt_bufnr, sorter_fn)
+  local current_picker = action_state.get_current_picker(prompt_bufnr)
+  current_picker:reset_selection()
+  local EntryManager = require "telescope.entry_manager"
+  local entries = {}
+  for e in current_picker.manager:iter() do
+    table.insert(entries, e)
+  end
+  table.sort(entries, sorter_fn)
+  current_picker.manager =
+    EntryManager:new(current_picker.max_results, current_picker.entry_adder, current_picker.stats)
+  local index = 1
+  for _, entry in ipairs(entries) do
+    current_picker.manager:_append_container(current_picker, { entry, 0 }, true)
+    index = index + 1
+  end
+  vim.schedule(function()
+    current_picker:set_selection(current_picker:get_reset_row())
+  end)
+end
+
+--- Toggle sorting by size of the entry.<br>
+--- Note: initially sorts descendingly in size.
+---@param prompt_bufnr number: The prompt bufnr
+fb_actions.sort_by_size = function(prompt_bufnr)
+  local finder = action_state.get_current_picker(prompt_bufnr).finder
+  finder.__sort_size = not finder.__sort_size
+  sort_by(prompt_bufnr, function(x, y)
+    if not x.stat then
+      return false
+    end
+    if not y.stat then
+      return true
+    end
+    if x.stat.size > y.stat.size then
+      return finder.__sort_size
+    elseif x.stat.size < y.stat.size then
+      return not finder.__sort_size
+      -- required separately
+    else
+      return false
+    end
+  end)
+end
+
+--- Toggle sorting by last change to the entry.<br>
+--- Note: initially sorts desendingly from most to least recently changed entry.
+fb_actions.sort_by_date = function(prompt_bufnr)
+  local finder = action_state.get_current_picker(prompt_bufnr).finder
+  finder.__sort_date = not finder.__sort_date
+  sort_by(prompt_bufnr, function(x, y)
+    if not x.stat then
+      return false
+    end
+    if not y.stat then
+      return true
+    end
+    if x.stat.mtime.sec > y.stat.mtime.sec then
+      return finder.__sort_date
+    elseif x.stat.mtime.sec < y.stat.mtime.sec then
+      return not finder.__sort_date
+      -- required separately
+    else
+      return false
     end
   end)
 end
