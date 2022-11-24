@@ -487,7 +487,7 @@ end
 fb_actions.toggle_hidden = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.hidden = not finder.hidden
+  finder.fd_args.show_hide = not finder.fd_args.show_hide
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
 end
 
@@ -547,7 +547,7 @@ end
 fb_actions.goto_cwd = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.path = vim.loop.cwd()
+  finder.path = finder.cwd
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
@@ -560,23 +560,17 @@ fb_actions.change_cwd = function(prompt_bufnr)
   local finder = current_picker.finder
   local entry_path = action_state.get_selected_entry().Path
   finder.path = entry_path:is_dir() and entry_path:absolute() or entry_path:parent():absolute()
-  finder.cwd = finder.path
-  vim.cmd("cd " .. finder.path)
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })
-  fb_utils.notify(
-    "action.change_cwd",
-    { msg = "Set the current working directory!", level = "INFO", quiet = finder.quiet }
-  )
 end
 
 --- Goto home directory in |telescope-file-browser.picker.file_browser|.
 ---@param prompt_bufnr number: The prompt bufnr
-fb_actions.goto_home_dir = function(prompt_bufnr)
+fb_actions.goto_working_dir = function(prompt_bufnr)
   local current_picker = action_state.get_current_picker(prompt_bufnr)
   local finder = current_picker.finder
-  finder.path = vim.loop.os_homedir()
+  finder.path = vim.loop.cwd()
 
   fb_utils.redraw_border_title(current_picker)
   current_picker:refresh(finder, { reset_prompt = true, multi = current_picker._multi })

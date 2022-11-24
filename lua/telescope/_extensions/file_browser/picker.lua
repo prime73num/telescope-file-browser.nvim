@@ -75,21 +75,16 @@ fb_picker.file_browser = function(opts)
   opts = opts or {}
 
   local cwd = vim.loop.cwd()
-  opts.depth = vim.F.if_nil(opts.depth, 1)
   opts.cwd_to_path = vim.F.if_nil(opts.cwd_to_path, false)
   opts.cwd = opts.cwd and vim.fn.expand(opts.cwd) or cwd
   opts.path = opts.path and vim.fn.expand(opts.path) or opts.cwd
-  opts.files = vim.F.if_nil(opts.files, true)
-  opts.quiet = vim.F.if_nil(opts.quiet, false)
-  opts.hide_parent_dir = vim.F.if_nil(opts.hide_parent_dir, false)
-  opts.select_buffer = vim.F.if_nil(opts.select_buffer, false)
   opts.display_stat = vim.F.if_nil(opts.display_stat, { date = true, size = true })
   opts.custom_prompt_title = opts.prompt_title ~= nil
   opts.custom_results_title = opts.results_title ~= nil
+  print(opts.fd_args.type)
 
   local select_buffer = opts.select_buffer and opts.files
   -- handle case that current buffer is a hidden file
-  opts.hidden = (select_buffer and vim.fn.expand("%:p:t"):sub(1, 1) == ".") and true or opts.hidden
   opts.finder = fb_finder.finder(opts)
   -- find index of current buffer in the results
   if select_buffer then
