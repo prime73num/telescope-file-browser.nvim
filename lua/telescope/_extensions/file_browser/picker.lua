@@ -81,7 +81,6 @@ fb_picker.file_browser = function(opts)
   opts.display_stat = vim.F.if_nil(opts.display_stat, { date = true, size = true })
   opts.custom_prompt_title = opts.prompt_title ~= nil
   opts.custom_results_title = opts.results_title ~= nil
-  print(opts.fd_args.type)
 
   local select_buffer = opts.select_buffer and opts.files
   -- handle case that current buffer is a hidden file

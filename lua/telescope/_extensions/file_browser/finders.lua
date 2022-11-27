@@ -20,7 +20,6 @@ local has_fd = vim.fn.executable "fd" == 1
 fb_finders.browse = function(opts)
   local cwd = opts.path
   local entry_maker = opts.entry_maker { cwd = cwd, display_stat = opts.display_stat }
-  print(opts.fd_args.type)
   local fd_args = opts.fd_args or {}
 
   local args = opts.make_args(fd_args)
@@ -52,7 +51,6 @@ fb_finders.finder = function(opts)
   opts = opts or {}
   -- cache entries such that multi selections are maintained across {file, folder}_browsers
   -- otherwise varying metatables misalign selections
-  print(opts.fd_args.type)
   opts.entry_cache = {}
   return setmetatable({
     display_stat = opts.display_stat,

@@ -51,12 +51,7 @@ local os_sep = Path.path.sep
 
 -- utility to get absolute path of target directory for create, copy, moving files/folders
 local get_target_dir = function(finder)
-  local entry_path
-  if finder.files == false then
-    local entry = action_state.get_selected_entry()
-    entry_path = entry and entry.value -- absolute path
-  end
-  return finder.files and finder.path or entry_path
+  return finder.path
 end
 
 -- return Path file on success, otherwise nil
